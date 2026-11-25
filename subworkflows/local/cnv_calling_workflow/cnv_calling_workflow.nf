@@ -40,7 +40,7 @@ workflow CNV_CALLING_WORKFLOW {
             return tsv_files
         }
 
-    // Only probands (phenotype=2) match ch_sample_meta  parents silently excluded
+    // Only probands (phenotype=2) match ch_sample_meta — parents silently excluded
     ch_cnv_matched = ch_tsv
         .join(
             ch_sample_meta.map { meta -> [meta.id, meta] },

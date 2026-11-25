@@ -2,7 +2,7 @@
 
 /*
 ========================================================================================
-    CNV CALLING PIPELINE (ClinCNV WES) v2.0  Trios
+    CNV CALLING PIPELINE (ClinCNV WES) v2.0 — Mixed Cohort
 ========================================================================================
     Production pipeline:
     - Auto-detects singleton vs mixed cohort from samplesheet
@@ -48,9 +48,12 @@ def helpMessage() {
         --previous_cov_dir  Path to previous batch .cov files (incremental mode)
 
     VEP Annotation (--run_vep true):
-        --vep_cache         VEP cache directory
-        --vep_plugins       VEP plugins directory
-        --sv_overlap_vcf    gnomAD-SV v4.1 VCF (tabix-indexed)
+        --vep_cache         VEP cache directory (cache version auto-detected)
+        --sv_overlap_vcf    gnomAD-SV v4.1 DEL/DUP VCF built by prepare_gnomad_sv.sh
+                            (gnomad.v4.1.sv.sites.DELDUP.noME.vcf.gz, .tbi alongside)
+        --vep_sv_plugin     Patched StructuralVariantOverlap.pm
+                            (default: assets/vep_plugins/StructuralVariantOverlap.pm)
+        --sv_overlap_pct    Min % of CNV covered by one gnomAD SV (default: 80)
 
     ClinCNV tuning:
         --clincnv_score_threshold   Minimum score (default: 60)
@@ -120,10 +123,23 @@ def validateParameters() {
     else if (!file(params.cnv_bed).exists())
         errors << "ERROR: cnv_bed not found: ${params.cnv_bed}"
 
+    // vcf_header has a config default (assets/header.vcf) but assets/ only gets
+    // NO_FILE created at runtime — if header.vcf is not committed, the failure
+    // surfaces inside MAKE_VCF instead of here.
+    if (!params.vcf_header)
+        errors << "ERROR: vcf_header not set"
+    else if (!file(params.vcf_header).exists())
+        errors << "ERROR: vcf_header not found: ${params.vcf_header}"
+
     if (params.run_vep) {
         if (!params.vep_cache)      errors << "ERROR: --vep_cache required when --run_vep true"
-        if (!params.vep_plugins)    errors << "ERROR: --vep_plugins required when --run_vep true"
         if (!params.sv_overlap_vcf) errors << "ERROR: --sv_overlap_vcf required when --run_vep true"
+        if (!file(params.vep_sv_plugin).exists())
+            errors << "ERROR: patched VEP plugin not found: ${params.vep_sv_plugin}"
+        else if (!file(params.vep_sv_plugin).text.contains('PATCH: avoid chrchr'))
+            errors << "ERROR: ${params.vep_sv_plugin} is not the patched StructuralVariantOverlap.pm"
+        if (params.sv_overlap_vcf && !file("${params.sv_overlap_vcf}.tbi").exists())
+            errors << "ERROR: index not found: ${params.sv_overlap_vcf}.tbi"
     }
 
     if (errors) {
@@ -151,6 +167,7 @@ log.info """
 ║  ClinCNV score >=   : ${params.clincnv_score_threshold}
 ║  ClinCNV min cluster: ${params.clincnv_min_cluster}
 ║  Run VEP            : ${params.run_vep}
+║  gnomAD-SV VCF      : ${params.run_vep ? params.sv_overlap_vcf : 'N/A'}
 ║  Output directory   : ${params.outdir}
 ║  Cohort type        : auto-detecting from samplesheet...
 ╚═══════════════════════════════════════════════════════════════════╝
@@ -198,7 +215,7 @@ workflow {
     ============================================================================
     */
 
-    ch_fasta      = Channel.value(file(params.fasta))
+    ch_fasta      = Channel.value(file(params.fasta,     checkIfExists: true))
     ch_fasta_fai  = Channel.value(file(params.fasta_fai, checkIfExists: true))
     ch_vcf_header = Channel.value(file(params.vcf_header))
     ch_cnv_bed    = Channel.value(file(params.cnv_bed,   checkIfExists: true))
@@ -241,7 +258,7 @@ workflow {
     */
 
     ch_vep_cache      = params.run_vep ? Channel.value(file(params.vep_cache,       checkIfExists: true)) : Channel.value(file("${projectDir}/assets/NO_FILE"))
-    ch_vep_plugins    = params.run_vep ? Channel.value(file(params.vep_plugins,     checkIfExists: true)) : Channel.value(file("${projectDir}/assets/NO_FILE"))
+    ch_vep_sv_plugin  = params.run_vep ? Channel.value(file(params.vep_sv_plugin,   checkIfExists: true)) : Channel.value(file("${projectDir}/assets/NO_FILE"))
     ch_sv_overlap     = params.run_vep ? Channel.value(file(params.sv_overlap_vcf,  checkIfExists: true)) : Channel.value(file("${projectDir}/assets/NO_FILE"))
     ch_sv_overlap_tbi = params.run_vep ? Channel.value(file("${params.sv_overlap_vcf}.tbi", checkIfExists: true)) : Channel.value(file("${projectDir}/assets/NO_FILE"))
     ch_gene_panel     = Channel.value(file("${projectDir}/assets/NO_FILE"))
@@ -250,7 +267,7 @@ workflow {
     ANNOTATION_WORKFLOW(
         ch_sorted_vcf,
         ch_vep_cache,
-        ch_vep_plugins,
+        ch_vep_sv_plugin,
         ch_sv_overlap,
         ch_sv_overlap_tbi,
         ch_gene_panel,
@@ -258,6 +275,12 @@ workflow {
     )
 
     ch_versions = ch_versions.mix(ANNOTATION_WORKFLOW.out.versions)
+
+    // Cohort table of gnomAD-SV overlap rates (sample, total, with_overlap, fraction)
+    ANNOTATION_WORKFLOW.out.sv_qc
+        .map { meta, f -> f.text }
+        .collectFile(name: 'sv_overlap_qc.tsv', storeDir: "${params.outdir}/pipeline_info",
+                     seed: "sample_id\ttotal_cnvs\tcnvs_with_overlap\tfraction\n", sort: true)
 
     /*
     ============================================================================

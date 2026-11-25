@@ -8,14 +8,33 @@ workflow COVERAGE_WORKFLOW {
 
     take:
     ch_bam         // channel: [ meta, bam, bai ]
-    ch_bed         // channel: value(cnv_bed)  gene names in col 4 (comma-separated)
+    ch_bed         // channel: value(cnv_bed) — gene names in col 4 (comma-separated)
     ch_fasta       // channel: value(fasta)
     ch_fasta_fai   // channel: value(fasta.fai)
 
     main:
     ch_versions = Channel.empty()
 
-    // Step 1: Annotate BED with GC content  runs once
+    // - Incremental mode guard ----------------------
+    // A wrong/moved previous_cov_dir must never silently yield zero archived
+    // samples: ClinCNV would succeed on a smaller normalisation cohort and
+    // emit different calls with nothing in the log to say history was lost.
+    def n_previous_cov = 0
+    if (params.previous_cov_dir) {
+        def prev_dir = file(params.previous_cov_dir)
+        if (!prev_dir.exists()) {
+            error "--previous_cov_dir does not exist: ${params.previous_cov_dir}"
+        }
+        n_previous_cov = prev_dir.list().findAll { it.endsWith('.cov') }.size()
+        if (n_previous_cov == 0) {
+            error "no .cov files found in --previous_cov_dir: ${params.previous_cov_dir}"
+        }
+        log.info "INFO: incremental mode — ${n_previous_cov} archived .cov file(s) from ${params.previous_cov_dir}"
+    } else {
+        log.info "INFO: current batch only — no --previous_cov_dir set"
+    }
+
+    // Step 1: Annotate BED with GC content — runs once
     GC_ANNOTATE_BED(
         ch_bed,
         ch_fasta,
@@ -46,13 +65,18 @@ workflow COVERAGE_WORKFLOW {
                     }
                 }
             }
+            if (inferred_sex == 0) {
+                log.warn "Sex could not be inferred for '${meta.id}' — sex-chromosome CN calls will be skipped for this sample"
+            } else {
+                log.info "INFO: inferred sex for '${meta.id}': ${inferred_sex == 1 ? 'male' : 'female'}"
+            }
             [ meta + [sex: inferred_sex], bam, bai ]
         }
 
     // Merge known-sex and inferred-sex channels
     ch_sex_updated = ch_known_sex.mix(ch_inferred)
 
-    // Step 3: Per-sample coverage (scatter)  current batch only
+    // Step 3: Per-sample coverage (scatter) — current batch only
     BED_COVERAGE(
         ch_sex_updated,
         GC_ANNOTATE_BED.out.annotated_bed
@@ -60,20 +84,43 @@ workflow COVERAGE_WORKFLOW {
     ch_versions = ch_versions.mix(BED_COVERAGE.out.versions)
 
     // Step 4: Build full cohort coverage channel
+    // ARCHIVE_COVERAGE writes this batch into the same directory that
+    // previous_cov_dir points at, so on any -resume or re-run of an already
+    // archived batch the glob below picks this batch up a second time.
+    // Dedupe by basename (BED_COVERAGE emits "${meta.id}.cov"), current wins:
+    // the current batch's freshly computed coverage supersedes any archived copy.
     ch_current_cov  = BED_COVERAGE.out.cov
     ch_previous_cov = params.previous_cov_dir
-        ? Channel.fromPath("${params.previous_cov_dir}/*.cov", checkIfExists: false)
+        ? Channel.fromPath("${params.previous_cov_dir}/*.cov", checkIfExists: true)
         : Channel.empty()
-    ch_all_cov = ch_current_cov.mix(ch_previous_cov)
+
+    // NB: do NOT use .collect().combine(.collect()) here — combine flattens both
+    // lists into one tuple, so the map would bind a single Path instead of a list.
+    // Tag each file with its origin and gather once with toList(), which does not flatten.
+    ch_merge_input = ch_current_cov.map { f -> [ 'current', f ] }
+        .mix( ch_previous_cov.map { f -> [ 'archive', f ] } )
+        .toList()
+        .map { items ->
+            def current  = items.findAll { it[0] == 'current' }.collect { it[1] }
+            def names    = current.collect { it.name } as Set
+            def archived = items.findAll { it[0] == 'archive' }.collect { it[1] }
+            def kept     = archived.findAll { !names.contains(it.name) }
+            def dropped  = archived.size() - kept.size()
+            if (dropped > 0) {
+                log.info "INFO: ${dropped} archived .cov file(s) superseded by the current batch"
+            }
+            log.info "INFO: cohort for ClinCNV = ${current.size()} current + ${kept.size()} archived = ${current.size() + kept.size()} samples"
+            current + kept
+        }
 
     // Step 5: Archive current batch .cov files to persistent store
     ARCHIVE_COVERAGE(
         ch_current_cov.collect()
     )
 
-    // Step 6: Merge full cohort
+    // Step 6: Merge full cohort (deduped: current batch + non-overlapping archive)
     MERGE_COVERAGE(
-        ch_all_cov.collect()
+        ch_merge_input
     )
     ch_versions = ch_versions.mix(MERGE_COVERAGE.out.versions)
 

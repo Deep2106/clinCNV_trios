@@ -271,6 +271,33 @@ If you use this pipeline, please cite:
 
 ---
 
+
+---
+
+## Citing this pipeline
+
+If you use this pipeline in your work, please cite it:
+
+
+BibTeX:
+
+```bibtex
+@software{bharti_clinCNV_trios_pipeline,
+  author  = {Bharti, Deepak},
+  title   = { ClinCNV CNV Calling Pipeline for trios},
+  version = {1.0.0},
+  year    = {2026},
+  url     = {https://github.com/Deep2106/clinCNV_trios}
+}
+```
+
+You can also use the **"Cite this repository"** button on the GitHub page. It reads [`CITATION.cff`](CITATION.cff) and gives the citation in APA and BibTeX.
+
+If the pipeline is published in a paper, cite that paper instead; this section will be updated with the reference.
+
+
+
+
 ## Author
 
 Deepak Bharti, Clinical Bioinformatician, RCSI Dublin

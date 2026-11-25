@@ -23,19 +23,19 @@ workflow INPUT_VALIDATION {
     SAMPLESHEET_CHECK ( samplesheet )
     ch_versions = ch_versions.mix(SAMPLESHEET_CHECK.out.versions)
 
-    // ── Parse validated CSV into sample channel ───────────────────────────
+    // - Parse validated CSV into sample channel -------------─
     ch_samples = SAMPLESHEET_CHECK.out.csv
         .splitCsv(header: true)
         .map { row -> _parse_row(row) }
 
-    // ── Emit BAM channel ──────────────────────────────────────────────────
+    // - Emit BAM channel -------------------------
     ch_bam = ch_samples
         .map { meta, bam, bai -> [ meta, file(bam), file(bai) ] }
 
-    // ── PED as value channel  shared safely across all downstream processes
+    // - PED as value channel — shared safely across all downstream processes
     ch_ped = SAMPLESHEET_CHECK.out.ped.first()
 
-    // ── Cohort type: read file content as string ──────────────────────────
+    // - Cohort type: read file content as string -------------
     ch_cohort_type = SAMPLESHEET_CHECK.out.cohort_type
         .map { f -> f.text.trim() }
 
@@ -46,7 +46,7 @@ workflow INPUT_VALIDATION {
     versions    = ch_versions
 }
 
-// ── Private helper: build meta map from CSV row ───────────────────────────
+// - Private helper: build meta map from CSV row -------------─
 def _parse_row(row) {
     def meta = [:]
     meta.id         = row.sample_id
